@@ -1,0 +1,663 @@
+#!/bin/sh
+
+#generic colours
+WHITE="$(tput bold ; tput setaf 7)"
+GREEN="$(tput setaf 2)"
+RED="$(tput bold; tput setaf 1)"
+YELLOW="$(tput bold ; tput setaf 3)"
+NC="$(tput sgr0)" # No Color
+
+#terminal colours
+export NEWT_COLORS='
+root=pruple,black
+window=white,gray
+border=lightgray,gray
+shadow=white,black
+button=black,green
+actbutton=black,red
+compactbutton=lightgray,black
+title=yellow,gray
+roottext=magenta,black
+textbox=lightgray,gray
+acttextbox=gray,white
+entry=black,lightgray
+disentry=gray,black
+checkbox=black,lightgray
+actcheckbox=black,green
+emptyscale=,lightgray
+fullscale=,brown
+listbox=black,lightgray
+actlistbox=lightgray,black
+actsellistbox=black,green
+' \
+#EFI support?
+EFIP="$(ls /sys/firmware/efi/efivars)"
+
+#LUKS
+LUKS="0"
+
+# boolean
+FALSE="0"
+TRUE="1"
+
+# return codes
+CORX="696"
+FAIL="969"
+
+#install_opts
+LIVE_MEDIA="1"
+AUTO="1"
+MANUAL="2"
+
+#verbose? default = quiet
+VERB="/dev/null"
+
+#safeguard hard-value *_* this script can wipe your hard drive (rm -rf /dev/*)!
+SG_EN="false"
+
+#root path
+ROOT="/mnt/arch"
+
+#file_system_defaults
+HD="/dev/sda"
+boot_blk="${HD}"
+boot_type="vfat"
+boot_size="100MB"
+root_blk="${HD}"
+root_type="btrfs"
+root_size="24GB"
+swap_blk="${HD}"
+swap_size="500MB"
+
+born()
+{
+    whiptail \
+    --title "Arch ISO version : $(uname -r)" \
+    --msgbox "                    =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= 
+                    OrOnZejuice OrOnZejuice OrOnZejuice
+                        OrOnZejuice                     
+                            OrOnZejuice                 
+                        beta_1.0_OrOnZejuice_1.0_beta   
+                                    OrOnZejuice         
+                                        OrOnZejuice     
+                    OrOnZejuice OrOnZejuice OrOnZejuice 
+                    =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= " 15 80
+}
+
+
+#critical error
+cry()
+{
+    fmt=${1}
+    shift
+    printf "%s[-] CRITICAL: ${fmt}%s\n" "${RED}" "${@}" "${NC}"
+
+    exit "${FAIL}"
+}
+
+#verbose
+sprint() {
+    fmt=$1
+    shift
+    printf "%s${fmt}%s\n" "${WHITE}" "$@" "${NC}"
+
+    return "${CORX}"
+}
+
+#check for database lock
+check_paclock()
+{
+    if [ -f /var/lib/pacman/db.lck ]; then
+        cry "package manager locked (maybe another update is going on?);try rm /var/lib/pacman/db.lck"
+    fi   
+}
+
+check_efi()
+{
+    if [ "${EFIP}" == "" ]; then
+        cry "\n! System is non-UEFI, this script is not for you !"
+    fi
+}
+
+partition_check()
+{
+    [ ${?} != "0" ] && cry "partitioning failed - check with fdisk / cfdisk"
+
+    return "${CORX}"   
+}
+
+filesys_check()
+{
+    [ ${?} != "0" ] && cry "formatting failed - check with fdisk / cdisk"
+
+    return "${CORX}"
+}
+
+check_verbose()
+{
+    verb_sel=$(
+    whiptail \
+    --backtitle output_mode \
+    --title Select_output_mode \
+    --menu "$1" 0 0 2 1 Quiet 2 Verbose \
+    3>&1 1>&2 2>&3)
+
+    if [ "${verb_sel}" == "2" ]; then
+        VERB="/dev/stdout"
+    else
+        printf "\nRunning in quiet mode!"
+    fi
+}
+
+set_sudoers() {
+    cat > /etc/sudoers <<EOF
+## sudoers file.
+##
+## This file MUST be edited with the 'visudo' command as root.
+## Failure to use 'visudo' may result in syntax or file permission errors
+## that prevent sudo from running.
+##
+## See the sudoers man page for the details on how to write a sudoers file.
+##
+
+##
+## Host alias specification
+##
+## Groups of machines. These may include host names (optionally with wildcards),
+## IP addresses, network numbers or netgroups.
+# Host_Alias	WEBSERVERS = www1, www2, www3
+
+##
+## User alias specification
+##
+## Groups of users.  These may consist of user names, uids, Unix groups,
+## or netgroups.
+# User_Alias	ADMINS = millert, dowdy, mikef
+
+##
+## Cmnd alias specification
+##
+## Groups of commands.  Often used to group related commands together.
+# Cmnd_Alias	PROCESSES = /usr/bin/nice, /bin/kill, /usr/bin/renice, \
+# 			    /usr/bin/pkill, /usr/bin/top
+
+##
+## Defaults specification
+##
+## You may wish to keep some of the following environment variables
+## when running commands via sudo.
+##
+## Locale settings
+# Defaults env_keep += "LANG LANGUAGE LINGUAS LC_* _XKB_CHARSET"
+##
+## Run X applications through sudo; HOME is used to find the
+## .Xauthority file.  Note that other programs use HOME to find   
+## configuration files and this may lead to privilege escalation!
+# Defaults env_keep += "HOME"
+##
+## X11 resource path settings
+# Defaults env_keep += "XAPPLRESDIR XFILESEARCHPATH XUSERFILESEARCHPATH"
+##
+## Desktop path settings
+# Defaults env_keep += "QTDIR KDEDIR"
+##
+## Allow sudo-run commands to inherit the callers' ConsoleKit session
+# Defaults env_keep += "XDG_SESSION_COOKIE"
+##
+## Uncomment to enable special input methods.  Care should be taken as
+## this may allow users to subvert the command being run via sudo.
+# Defaults env_keep += "XMODIFIERS GTK_IM_MODULE QT_IM_MODULE QT_IM_SWITCHER"
+##
+## Uncomment to enable logging of a command's output, except for
+## sudoreplay and reboot.  Use sudoreplay to play back logged sessions.
+# Defaults log_output
+# Defaults!/usr/bin/sudoreplay !log_output
+# Defaults!/usr/local/bin/sudoreplay !log_output
+# Defaults!/sbin/reboot !log_output
+
+##
+## Runas alias specification
+##
+
+##
+## User privilege specification
+##
+root ALL=(ALL) ALL
+
+## Uncomment to allow members of group wheel to execute any command
+%wheel ALL=(ALL) ALL
+
+## Same thing without a password
+# %wheel ALL=(ALL) NOPASSWD: ALL
+
+## Uncomment to allow members of group sudo to execute any command
+# %sudo ALL=(ALL) ALL
+
+## Uncomment to allow any user to run sudo if they know the password
+## of the user they are running the command as (root by default).
+# Defaults targetpw  # Ask for the password of the target user
+# ALL ALL=(ALL) ALL  # WARNING: only use this together with 'Defaults targetpw'
+
+%rfkill ALL=(ALL) NOPASSWD: /usr/sbin/rfkill
+%network ALL=(ALL) NOPASSWD: /usr/bin/netcfg, /usr/bin/wifi-menu
+
+## Read drop-in files from /etc/sudoers.d
+## (the '#' here does not indicate a comment)
+#includedir /etc/sudoers.d
+EOF
+
+    chmod 440 /etc/sudoers
+}
+
+set_locale() {
+    echo 'LANG="en_US.UTF-8"' >> /etc/locale.conf
+    echo 'LC_COLLATE="C"' >> /etc/locale.conf
+    echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+    locale-gen
+}
+
+create_user() {
+    local name="$1"; shift
+    local password="$1"; shift
+
+    useradd -m -s /bin/zsh -G adm,systemd-journal,wheel,rfkill,games,network,video,audio,optical,floppy,storage,scanner,power,adbusers,wireshark "$name"
+    echo -en "$password\n$password" | passwd "$name"
+}
+
+#arch update
+update_system()
+{
+    if [ "$(uname -m)" == "x86_64" ]; then
+        if grep -q "#\[multilib\]" /etc/pacman.conf; then
+            # it exist but commented
+            wprintf "*-_-* Uncommenting multilib in /etc/pacman.conf..."
+            sed -i '/\[multilib\]/{ s/^#//; n; s/^#//; }' /etc/pacman.conf
+        elif ! grep -q "\[multilib\]" /etc/pacman.conf; then
+            # it does not exist at all
+            wprintf "*-_-* Enabling multilib in /etc/pacman.conf..."
+            printf "[multilib]\nInclude = /etc/pacman.d/mirrorlist\n" >> /etc/pacman.conf
+        fi
+    fi
+
+    pacman -Syy --noconfirm
+    echo ""
+    return "${CORX}"
+}
+
+#HD encryption
+enc_luks()
+{
+    printf "%s" "${WHITE}"
+    # user inp for luks
+    LUKS=$(
+    whiptail \
+    --backtitle Do_you_want_full_encrypted_root? \
+    --title LUKS \
+    --menu "$1" 0 0 2 1 YES 2 NO 3>&1 1>&2 2>&3)
+    #echo ${LUKS}
+    if [ $LUKS == 1 ]; then
+	    printf "* Root will be encrypted *\n"
+    else
+	    printf "* Root will NOT be encrypted *\n"
+    fi
+
+}
+
+#AUTO
+format_filesys()
+{
+    #re-declare AUTO defaults
+    boot_blk="${HD}"
+    boot_type="ext2"
+    boot_size="105MB"
+    root_blk="${HD}"
+    root_type="btrfs"
+    root_size="24GB"
+    swap_blk="${HD}"
+    swap_size="505MB"
+
+    whiptail \
+        --backtitle "Restructuring ${HD}"\
+        --title "AUTO INSTALL" \
+        --msgbox "\n\nCreating and formatting partitions:
+=> boot - ${boot_blk}1 : Size  ${boot_size} : Type ${boot_type}
+=> swap - ${swap_blk}2 : Size  ${swap_size} : Type SWAP
+=> root - ${root_blk}3 : Size ${root_size} : Type ${root_type}
+"  13 55
+    printf "\n%s" "${RED}" "Apply previously displayed partitioning scheme? [y/N]: "; read conf
+    [ "${conf}" == "y" ] || [ "${conf}" == "Y" ] && printf "! Re-confirm Choice [y/N]: "; read conf
+    printf "%s" "${WHITE}"
+
+    if [ "${conf}" == "y" ] || [ "${conf}" == "Y" ]; then
+        #erases disk
+        parted -s "${HD}" mklabel msdos
+        partition_check
+        (echo n; echo p; echo 1; echo ; echo +${boot_size}; echo w; echo q) | fdisk ${HD}
+        partition_check
+        #make partition bootable
+        parted "${boot_blk}" set 1 boot on
+        check_parted_status
+        (echo n; echo p; echo 2; echo ; echo +${swap_size}; echo w; echo q) | fdisk ${HD}
+        partition_check
+        (echo n; echo p; echo 3; echo ; echo +${root_size}; echo w; echo q) | fdisk ${HD}
+        partition_check
+
+    boot_blk="${boot_blk}1"
+    swap_blk="${swap_blk}2"
+    root_blk="${root_blk}3"
+
+    "mkfs.${boot_type}" -L boot "${boot_blk}"; 
+    #"mkfs.${boot_type}" "${boot_blk}";
+    if [ "${boot_type}" == "vfat" ]; then
+        fatlabel "${boot_blk}" boot
+    fi
+    filesys_check
+    echo "*-_-* Boot partition created ${boot_blk}"
+    if [ "$LUKS" == TRUE ]; then
+        #encr root
+        echo ""
+        echo "*-_-* Formatting ROOT, Enter passphrase:"
+        cryptsetup -y -v luksFormat "${root_blk}"
+        echo ""
+        echo "*-_-* Re-enter passphrase:"
+        cryptsetup open "${root_blk}" cryptroot
+        "mkfs.${root_type}" -L root -f "/dev/mapper/cryptroot"; 
+        if [ "${root_type}" == "btrfs" ]; then
+            btrfs filesystem label "${root_blk}" "root" 
+        fi
+        filesys_check
+        echo ""
+        echo "*-_-* Root partition created ${root_blk}"
+    else
+        "mkfs.${root_type}" -L root -f "${root_blk}"; 
+        if [ "${root_type}" == "btrfs" ]; then
+            btrfs filesystem label "${root_blk}" "root" 
+        fi
+        filesys_check
+		echo ""
+        echo "*-_-* Root partition created ${root_blk}"
+    fi
+    /usr/bin/mkswap ${swap_blk};
+    filesys_check
+    echo ""
+    echo "*-_-* Swap partition created ${swap_blk}"
+
+    else
+        printf "%s" "${RED}" "No changes were made!, returning to setup%s\n" "${NC}"
+        setup_filesys
+        return "${CORX}"
+    fi
+
+    return "${CORX}"
+}
+
+man_part()
+{
+    boot_blk="${HD}1"
+    root_blk="${HD}2"
+    swap_blk="${HD}3"
+
+    echo "*-_-* specify partitioning with cfdisk"
+    echo ""
+    echo "!Assign Boot, Swap and Root! in that order"
+    sleep 3
+    echo ""
+    cfdisk "${HD}"
+    printf "  --| Suffix of the boot partition created /dev/sda[1]: "
+    read conf; [ "${conf}" != "" ] && boot_blk="${HD}${conf}"
+    printf "  --| Boot partition fs [vfat]: "
+    read conf; [ "${conf}" != "" ] && boot_type="${conf}"
+    printf "  --| Suffix of the swap partition created /dev/sda[2]: "
+    read conf; [ "${conf}" != "" ] && swap_blk="${HD}${conf}"
+    printf "  --| Suffix of the root partition created /dev/sda[3]: "
+    read conf; [ "${conf}" != "" ] && root_blk="${HD}${conf}"
+    printf "  --| Type of Root partition [btrfs]: "
+    read conf; [ "${conf}" != "" ] && root_type="${conf}"
+
+    whiptail \
+        --backtitle "Restructuring ${HD}"\
+        --title "MANUAL INSTALL" \
+        --msgbox "\n\nCreating and formatting partitions:
+=> boot - ${boot_blk} : Type ${boot_type}
+=> swap - ${swap_blk} : Type SWAP
+=> root - ${root_blk} : Type ${root_type}
+"  13 55
+    printf "\n%s" "${RED}" "Apply previously displayed partitioning scheme? [y/N]: "; read conf
+    [ "${conf}" == "y" ] || [ "${conf}" == "Y" ] && printf "! Re-confirm Choice [y/N]: "; read conf
+    printf "%s" "${WHITE}"
+
+    if [ "${conf}" == "y" ] || [ "${conf}" == "Y" ]; then
+        "mkfs.${boot_type}" -L boot "${boot_blk}"; 
+        #"mkfs.${boot_type}" "${boot_blk}";
+        #mkfs -t vfat -L EFI "${boot_blk}";
+        if [ "${boot_type}" == "vfat" ]; then
+            fatlabel "${boot_blk}" boot
+        fi
+        filesys_check
+        echo "*-_-* Boot partition created ${boot_blk}"
+    if [ "$LUKS" == TRUE ]; then
+        #encr root
+        echo ""
+        echo "*-_-* Formatting ROOT, Enter passphrase:"
+        cryptsetup -y -v luksFormat "${root_blk}"
+        echo ""
+        echo "*-_-* Re-enter passphrase:"
+        cryptsetup open "${root_blk}" cryptroot
+        "mkfs.${root_type}" -L root -f "/dev/mapper/cryptroot"; 
+        if [ "${root_type}" == "btrfs" ]; then
+            btrfs filesystem label "${root_blk}" "root"
+        fi
+        filesys_check
+        echo ""
+        echo "*-_-* Root partition created ${root_blk}"
+    else
+        "mkfs.${root_type}" -L root -f "${root_blk}";
+        if [ "${root_type}" == "btrfs" ]; then
+            btrfs filesystem label "${root_blk}" "root" 
+        fi
+        filesys_check
+		echo ""
+        echo "*-_-* Root partition created ${root_blk}"
+    fi
+    /usr/bin/mkswap ${swap_blk};
+    filesys_check
+    echo ""
+    echo "*-_-* Swap partition created ${swap_blk}"
+
+    else
+        printf "%s" "${RED}" "No changes were made!, returning to setup%s\n" "${NC}"
+        setup_filesys
+        return "${CORX}"
+    fi
+
+    return "${CORX}"
+
+}
+
+setup_filesys()	    
+{
+    printf "%s" "${WHITE}"
+
+    #Quick install 
+    # user input settings
+    printf "\n$(lsblk)\n"
+    printf "\nExample format for selection: /dev/sda, /dev/nvme0n1p"
+    printf "\nSelect block device (!non partition) for install :\n" 
+    printf "currently selected [%s]: " "${HD}"
+    read a; [ "${a}" != "" ] && HD=${a} # sanitize input
+
+    printf "Selected block device: %s\n" "${HD}"
+
+    if [ "${sel}" == "${AUTO}" ]; then
+        sel="3"
+        while ! [ "${sel}" == "${AUTO}" -o "${sel}" == "${MANUAL}" ]; do
+            printf "*-_-* Partition mode in AUTOMATIC:\n"
+            printf "%s\n[!FINAL WARNING!] \nIf this is a real env (not a Virtual Machine):\n" "${RED}"
+            printf " * It is recommended to carry out manual partitioning option 2.\n"
+            printf " * It is not too late to turn back if udk what u doing|no crying afterwards! ;_;\n[!FINAL WARNING!]\n\n%s" "${WHITE}"
+            printf "    1. Automatic - erases selected disk! Assigns defaults\n"
+            printf "    2. Manual - set manual partitions with cfdisk and format them\n"
+            printf "\nSelect an option: "; read sel
+        done
+    fi
+
+    if [ "${sel}" == "${MANUAL}" ]; then
+        printf "*-_-* Partition mode: MANUAL\n"
+        man_part
+    else
+        format_filesys
+    fi
+    return "${CORX}"
+}
+
+#mount_file_system
+mfsys()
+{
+    #mkdir -p "${ROOT}"
+    if [ "$LUKS" == TRUE ]; then
+	    mount -t "${root_type}" /dev/mapper/cryptroot "${ROOT}"
+    else
+	    mount -t "${root_type}" "${root_blk}" "${ROOT}"
+    fi
+    mkdir -p "${ROOT}/boot"
+    mount -t "${boot_type}" "${boot_blk}" "${ROOT}/boot"
+    swapon ${swap_blk}
+    return "${CORX}"
+}
+
+dump_livemedia()
+{
+    t=8 remaining=8;
+    SECONDS=0;
+    while sleep .1; do
+        printf '\r .. Dumping contents of LIVE media ..'"${GREEN}$remaining"${NC}' ';
+        if (( (remaining=t-SECONDS) <=0 )); then
+            printf '\rseconds rem.' 0;
+            break;
+        fi;
+    done
+
+    cp -Rpv /bin /etc /home /lib /lib64 /opt /root /srv /usr /var /tmp "${ROOT}"
+
+    # cleaning LIVE files - org. will be re-created
+    rm -rf "${ROOT}/etc/{group, passwd, shadow*, gshadow*}"
+
+    printf "*-_-* Dump successful!"
+
+    return "${CORX}"
+}
+
+install_core()
+{
+    sprint "* --| Installing Arch Core Packages"
+    #echo 'Server = http://mirrors.kernel.org/archlinux/$repo/os/$arch' >> /etc/pacman.d/mirrorlist
+    pacstrap -c "${ROOT}" base base-devel
+    #need more / space
+    #pacstrap -c "${ROOT}" linux linux-firmware 
+    #syslinux-install_update script does not currently support EFI install
+    #pacstrap -c "${ROOT}" syslinux 
+    [ ${?} != "0" ] && cry "Failed to install ArchLinux base packages"
+    return "${CORX}"
+}
+
+main_menu()
+{
+    sel=$(
+    whiptail \
+    --backtitle OrOnZe_juice_1.0_beta \
+    --title Select_Install_Option \
+    --menu "$1" 0 0 2 1 Automatic 2 Manual \
+    3>&1 1>&2 2>&3)
+
+    return "${CORX}"
+}
+
+install()
+{
+    sel=${1}
+    [ "${sel}" == "${AUTO}" ] && LIVE="true"
+
+    printf "\n"
+    #live ISO update
+    sprint "*-_-* System Update .."
+    #update_system
+    
+    #filesys setup
+    sprint "*-_-* Configuring Hard Drive .."
+    #LUKS is broken
+    #enc_luks
+    setup_filesys
+    
+    #/mnt
+    sprint "*-_-* Mount filesystem .."
+    mfsys
+#    dump_livemedia
+
+    #syslinuxefi install
+#    mkdir -p "${ROOT}/boot/efi"
+    mkdir "${ROOT}/boot/syslinux"
+    cp /usr/lib/syslinux/bios/*.c32 "${ROOT}/boot/syslinux"
+    extlinux --install "${ROOT}/boot/syslinux"
+    sgdisk /dev/sda --attributes=1:set:2
+    sgdisk /dev/sda --attributes=1:show
+    dd bs=440 count=1 conv=notrunc if=/usr/lib/syslinux/bios/gptmbr.bin of=/dev/sda 
+#    mount -t "${boot_type}" "${boot_blk}" "${ROOT}/boot/efi"
+
+#    #efi workaround for syslinux
+#    mkdir -p "${ROOT}/boot/efi/EFI/syslinux"
+#    cp -r /usr/lib/syslinux/efi64/* "${ROOT}/boot/efi/EFI/syslinux"
+#    efibootmgr --create --disk "${HD}" --part 1 --loader "${ROOT}/boot/efi/EFI/syslinux/syslinux.efi" --label "Syslinux" --verbose
+#    cat > "${ROOT}/boot/efi/EFI/syslinux/syslinux.cfg" <<EOF
+#    PROMPT 1
+#    TIMEOUT 50
+#    DEFAULT arch
+#    LABEL arch
+#    LINUX ../vmlinuz-linux
+#    APPEND root=UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX rw rootflags=subvol=ROOT
+#    INITRD ../initramfs-linux.img
+#    
+#    LABEL archfallback
+#    LINUX ../vmlinuz-linux
+#    APPEND root=UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX rw rootflags=subvol=ROOT
+#    INITRD ../initramfs-linux-fallback.img
+#EOF
+    #syslinux-install_update -iam
+
+    #pacstrap //base
+    sprint "*-_-* Installing packages .."
+    install_core
+
+    #fstab gen.
+    sprint "*-_-* fstab generation .."
+    genfstab -U "${ROOT}" >> "${ROOT}/etc/fstab"
+
+    #chroot
+    arch-chroot "${ROOT}"
+
+    #locale generation prob
+    #grub-install --target=x86_64-efi --efi-directory="/efi/" --bootloader-id=ArchLinux
+    #grub-mkconfig -o "/boot/grub/grub.cfg"
+    
+
+}
+
+main()
+{
+    echo "This script will install Arch version : $(uname -r)"
+    born
+    read -n 1 -srp "Press any key to continue"
+    
+    check_paclock
+    #check_efi
+    
+
+    if [[ "${SG_EN}" == "false" ]]; then
+        main_menu
+        #check_verbose
+        install ${sel}
+    else
+        cry "Safeguard active"
+    fi
+}
+
+main ${*}
